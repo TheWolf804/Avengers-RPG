@@ -1,0 +1,17 @@
+
+#include <raylib.h>
+
+int main () {
+    InitWindow (800, 600, "First window");
+    while (!WindowShouldClose()) { // while the window should NOT close
+    // ! means NOT
+    // 60fps
+    // 1 frame -> 2nd frame
+    // clear the background -> draw -> go to the second frame -> clear the background -> draw
+        BeginDrawing();
+            ClearBackground(SKYBLUE);
+            DrawPixel (400, 300, BLACK);
+        EndDrawing();
+    }
+    CloseWindow();
+}
