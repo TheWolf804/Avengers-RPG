@@ -1,0 +1,260 @@
+#include <raylib.h>
+#include <time.h>
+#include <stdlib.h>
+#include <string.h>
+#include <stdio.h>
+#include <math.h>
+
+typedef enum State {
+    Game,
+    Dead,
+    Menu,
+    Settings,
+    Submenu,
+    Back,
+} State;
+
+typedef enum Difficulty {
+    Practise,
+    Easy,
+    Normal,
+    Hard,
+    Insane,
+    Nightmare,
+    Deathwish,
+    Armagedon
+} Difficulty;
+
+enum Difficulty diff;
+
+typedef struct Game {
+    int health;
+    float playerSpeed, enemySpeed ,enemyVelocity;
+    float bombInterval, bombTimer, appleTotal;
+    float enemyTotal;
+} Game;
+
+#define MAX_BOMBS 0xFF
+#define MAX_APPLES 0xFF
+#define MAX_ENEMIES 0xFF
+#define MAX_WORLDS 8
+
+typedef struct Bomb {
+    float x[MAX_BOMBS], y[MAX_BOMBS];
+    int number;
+    bool used[MAX_BOMBS];
+} Bomb;
+
+typedef struct Apple {
+    float x[MAX_APPLES], y[MAX_APPLES];
+    int number;
+    bool used[MAX_APPLES];
+} Apple;
+
+typedef struct Enemy {
+    int x[MAX_ENEMIES], y[MAX_ENEMIES];
+    int number;
+} Enemy;
+
+typedef struct World { // NEW
+    int id;
+    Texture2D background;
+    int enemyCount;
+    bool bossFightStarted;
+} World;
+
+typedef struct Boss { // NEW
+    Vector2 pos;
+    int health;
+    bool isActive;
+    Texture2D sprite;
+} Boss;
+
+struct Game game;
+Apple apples;
+Bomb bombs;
+Enemy enemies;
+
+State state = Menu;
+float windowX = 800, windowY = 600;
+int numberOfCircles = 0;
+char *title = "Avengers RPG";
+
+Sound click, eat, hurt, explosion;
+Texture2D plank, brick, grass, apple, bomb;
+Texture2D bg;
+Texture2D fruit;
+Music music;
+
+World worlds[MAX_WORLDS]; // NEW
+int currentWorld = 0; // NEW
+Boss boss; // NEW
+
+// Function declarations
+void difficultySelector(Difficulty diff);
+void LoadWorld(int id);
+void InitBoss();
+
+float sigmoid(float x) {
+    return 1.0f / (1 + expf(-x));
+}
+
+void LoadWorld(int id) {
+    currentWorld = id;
+
+    switch (id) {
+        case 0:
+            bg = LoadTexture("world0_bg.png"); // NEW texture
+            game.enemyTotal = 3;
+            game.appleTotal = 5;
+            break;
+        default:
+            bg = LoadTexture("default_bg.png");
+            game.enemyTotal = 4;
+            game.appleTotal = 3;
+            break;
+    }
+
+    enemies.number = game.enemyTotal;
+    for (int i = 0; i < enemies.number; i++) {
+        enemies.x[i] = GetRandomValue(0, windowX);
+        enemies.y[i] = GetRandomValue(0, windowY);
+    }
+
+    apples.number = game.appleTotal;
+    for (int i = 0; i < apples.number; i++) {
+        apples.x[i] = GetRandomValue(0, windowX);
+        apples.y[i] = GetRandomValue(0, windowY);
+        apples.used[i] = false;
+    }
+
+    bombs.number = 0;
+    bombs.used[0] = false;
+    boss.isActive = false;
+
+    printf("World %d loaded\n", id);
+}
+
+void InitBoss() {
+    boss.pos = (Vector2){ GetRandomValue(100, windowX - 100), GetRandomValue(100, windowY - 100) };
+    boss.health = 5;
+    boss.isActive = true;
+    boss.sprite = LoadTexture("boss.png"); // Load from file
+}
+
+// Your existing functions remain unchanged (e.g., menu, settings, keys, bonds, etc.)
+
+int main() {
+    InitAudioDevice();
+    music = LoadMusicStream("guns.ogg");
+    click = LoadSound("click.ogg");
+    eat = LoadSound("eat.ogg");
+    hurt = LoadSound("hurt.ogg");
+    explosion = LoadSound("bomb.wav");
+    SetMusicVolume(music, 0.3f);
+    PlayMusicStream(music);
+
+    SetConfigFlags(FLAG_WINDOW_RESIZABLE);
+    InitWindow(windowX, windowY, "First window");
+
+    plank = LoadTexture("plank.png");
+    brick = LoadTexture("brick.png");
+    grass = LoadTexture("grass.png");
+    apple = LoadTexture("apple.png");
+    bomb = LoadTexture("bomb.png");
+    Texture2D player = LoadTexture("smile.png");
+    Texture2D enemy = LoadTexture("enemy.png");
+
+    SetTargetFPS(60);
+
+    float px = windowX / 2;
+    float py = windowY / 2;
+    float ex = GetRandomValue(0, windowX);
+    float ey = GetRandomValue(0, windowY);
+
+    int size = 64;
+    float delay = 1.0f;
+
+    diff = Practise;
+    difficultySelector(diff);
+    LoadWorld(0); // NEW: load world 0
+
+    while (!WindowShouldClose()) {
+        float dt = GetFrameTime();
+        UpdateMusicStream(music);
+        Vector2 func = {
+            sigmoid(ex / windowX - 1),
+            sigmoid(ey / windowY - 1),
+        };
+
+        if (state == Game) {
+            // Movement, collision, enemy updates...
+            // (Keep your original logic here)
+
+            // BOSS TRIGGER
+            if (numberOfCircles >= 5 && !boss.isActive) {
+                InitBoss();
+            }
+        }
+
+        BeginDrawing();
+        windowX = GetRenderWidth();
+        windowY = GetRenderHeight();
+        ClearBackground(SKYBLUE);
+
+        if (state <= Dead) {
+            // Draw background
+            DrawTexture(bg.id > 0 ? bg : grass, 0, 0, WHITE); // fallback
+
+            // Draw player, enemies, apples...
+
+            // Draw BOSS
+            if (boss.isActive) {
+                Rectangle bossRect = { boss.pos.x, boss.pos.y, 128, 128 };
+                SetShapesTexture(boss.sprite, (Rectangle){0, 0, 1024, 1024});
+                DrawRectangleRec(bossRect, WHITE);
+
+                float distToBoss = sqrt(pow(px - boss.pos.x, 2) + pow(py - boss.pos.y, 2));
+                if (distToBoss <= 64 && IsKeyPressed(KEY_F)) {
+                    boss.health--;
+                    PlaySound(hurt);
+                }
+
+                if (boss.health <= 0) {
+                    boss.isActive = false;
+                    currentWorld++;
+                    if (currentWorld < MAX_WORLDS) {
+                        LoadWorld(currentWorld);
+                    } else {
+                        DrawText("YOU WIN!", windowX/2 - 100, windowY/2, 40, GREEN);
+                        state = Menu;
+                    }
+                }
+            }
+
+            DrawText(TextFormat("World: %i", currentWorld + 1), 10, 150, 30, DARKBLUE);
+            DrawText(TextFormat("Score: %i", numberOfCircles), 10, 10, 30, WHITE);
+            DrawText(TextFormat("Health: %i", game.health), 10, 50, 30, RED);
+        }
+
+        if (state == Menu) {
+            // Draw menu
+        }
+        if (state == Settings) {
+            // Draw settings
+        }
+
+        EndDrawing();
+    }
+
+    // Cleanup
+    UnloadTexture(player);
+    UnloadTexture(enemy);
+    UnloadTexture(boss.sprite);
+    UnloadTexture(bg);
+    UnloadMusicStream(music);
+    CloseAudioDevice();
+    CloseWindow();
+
+    return 0;
+}
