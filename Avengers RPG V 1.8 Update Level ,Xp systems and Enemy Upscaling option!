@@ -1,0 +1,426 @@
+#include <raylib.h>
+#include <raymath.h>   // For Vector2 helper functions
+#include <stdlib.h>
+#include <stdio.h>
+#include <math.h>
+#include <time.h>
+
+typedef enum State {
+    GameState,
+    Dead,
+    Menu,
+    Settings,
+    Submenu,
+    Back,
+    Paused
+} State;
+
+typedef enum Difficulty {
+    Practise,
+    Easy,
+    Normal,
+    Hard,
+    Insane,
+    Nightmare,
+    Deathwish,
+    Armagedon
+} Difficulty;
+
+typedef struct GameData {
+    int health;
+    float playerSpeed;
+    float enemySpeedBase;
+    float bombInterval;
+    float bombTimer;
+    float appleTotal;
+    float enemyTotal;
+
+    // Level system
+    int level;
+    int xp;
+    int xpToNextLevel;
+} GameData;
+
+#define MAX_BOMBS 0xFF
+#define MAX_APPLES 0xFF
+#define MAX_ENEMIES 0xFF
+#define MAX_WORLDS 8
+#define MAX_LEVEL 20
+
+typedef struct Bomb {
+    float x[MAX_BOMBS], y[MAX_BOMBS];
+    int number;
+    bool used[MAX_BOMBS];
+} Bomb;
+
+typedef struct Apple {
+    float x[MAX_APPLES], y[MAX_APPLES];
+    int number;
+    bool used[MAX_APPLES];
+} Apple;
+
+typedef struct Enemy {
+    int x[MAX_ENEMIES], y[MAX_ENEMIES];
+    int health[MAX_ENEMIES];
+    int maxHealth[MAX_ENEMIES];
+    int number;
+} Enemy;
+
+typedef struct World {
+    int id;
+    Texture2D background;
+    int enemyCount;
+    bool bossFightStarted;
+} World;
+
+typedef struct Boss {
+    Vector2 pos;
+    int health;
+    bool isActive;
+    float speed;
+    Texture2D sprite;
+} Boss;
+
+// Globals
+State state = Menu;
+Difficulty diff = Practise;
+
+GameData game;
+Apple apples;
+Bomb bombs;
+Enemy enemies;
+
+float windowX = 800, windowY = 600;
+int numberOfCircles = 0;
+
+Sound click, eat, hurt, explosion;
+Texture2D plank, brick, grass, apple, bomb;
+Texture2D bg;
+Texture2D fruit;
+Music music;
+
+World worlds[MAX_WORLDS];
+int currentWorld = 0;
+Boss boss;
+
+// Level up display timer and flag
+bool showLevelUp = false;
+float levelUpTimer = 0.0f;
+
+// Helper functions
+float sigmoid(float x) {
+    return 1.0f / (1 + expf(-x));
+}
+
+void difficultySelector(Difficulty diff) {
+    switch (diff) {
+        case Practise:
+            game.health = 10;
+            game.playerSpeed = 200.0f;
+            game.enemySpeedBase = 60.0f;
+            break;
+        case Easy:
+            game.health = 8;
+            game.playerSpeed = 180.0f;
+            game.enemySpeedBase = 80.0f;
+            break;
+        default:
+            game.health = 5;
+            game.playerSpeed = 150.0f;
+            game.enemySpeedBase = 100.0f;
+            break;
+    }
+}
+
+// XP and leveling system functions
+
+void InitLevelSystem() {
+    game.level = 1;
+    game.xp = 0;
+    game.xpToNextLevel = 100;
+}
+
+void UpdateEnemyStats() {
+    for (int i = 0; i < enemies.number; i++) {
+        enemies.maxHealth[i] = 3 + game.level;          // base health + player level
+        enemies.health[i] = enemies.maxHealth[i];
+    }
+}
+
+void AddXP(int amount) {
+    if (game.level >= MAX_LEVEL) {
+        if (game.xp + amount > game.xpToNextLevel) {
+            game.xp = game.xpToNextLevel;
+        } else {
+            game.xp += amount;
+        }
+        return;
+    }
+
+    game.xp += amount;
+
+    while (game.xp >= game.xpToNextLevel && game.level < MAX_LEVEL) {
+        game.xp -= game.xpToNextLevel;
+        game.level++;
+        game.xpToNextLevel = (int)(game.xpToNextLevel * 1.5f);
+        game.health += 1;
+        game.playerSpeed += 10.0f;
+        game.enemySpeedBase += 5.0f; // Increase base enemy speed on level up
+
+        UpdateEnemyStats();          // Update enemy health with new level
+
+        PlaySound(click);
+        showLevelUp = true;
+        levelUpTimer = 2.0f;
+
+        if (game.level >= MAX_LEVEL) {
+            game.xp = game.xpToNextLevel;
+            break;
+        }
+    }
+}
+
+void LoadWorld(int id) {
+    currentWorld = id;
+
+    if (bg.id > 0) UnloadTexture(bg);
+
+    switch (id) {
+        case 0:
+            bg = LoadTexture("world0_bg.png");
+            game.enemyTotal = 3;
+            game.appleTotal = 5;
+            break;
+        default:
+            bg = LoadTexture("default_bg.png");
+            game.enemyTotal = 4;
+            game.appleTotal = 3;
+            break;
+    }
+
+    enemies.number = (int)game.enemyTotal;
+    for (int i = 0; i < enemies.number; i++) {
+        enemies.x[i] = GetRandomValue(0, (int)windowX);
+        enemies.y[i] = GetRandomValue(0, (int)windowY);
+    }
+
+    apples.number = (int)game.appleTotal;
+    for (int i = 0; i < apples.number; i++) {
+        apples.x[i] = GetRandomValue(0, (int)windowX);
+        apples.y[i] = GetRandomValue(0, (int)windowY);
+        apples.used[i] = false;
+    }
+
+    bombs.number = 0;
+    for (int i = 0; i < MAX_BOMBS; i++) bombs.used[i] = false;
+
+    boss.isActive = false;
+
+    UpdateEnemyStats();
+
+    printf("World %d loaded\n", id);
+}
+
+void InitBoss() {
+    if (boss.sprite.id > 0) UnloadTexture(boss.sprite);
+
+    boss.pos = (Vector2){ GetRandomValue(100, (int)windowX - 100), GetRandomValue(100, (int)windowY - 100) };
+    boss.health = 5 + game.level * 2;  // Boss health scales too
+    boss.isActive = true;
+    boss.speed = 100.0f + game.level * 5.0f;
+    boss.sprite = LoadTexture("boss.png");
+}
+
+int main(void) {
+    InitAudioDevice();
+    music = LoadMusicStream("guns.ogg");
+    click = LoadSound("click.ogg");
+    eat = LoadSound("eat.ogg");
+    hurt = LoadSound("hurt.ogg");
+    explosion = LoadSound("bomb.wav");
+    SetMusicVolume(music, 0.3f);
+    PlayMusicStream(music);
+
+    SetConfigFlags(FLAG_WINDOW_RESIZABLE);
+    InitWindow((int)windowX, (int)windowY, "First window");
+
+    plank = LoadTexture("plank.png");
+    brick = LoadTexture("brick.png");
+    grass = LoadTexture("grass.png");
+    apple = LoadTexture("apple.png");
+    bomb = LoadTexture("bomb.png");
+    Texture2D player = LoadTexture("smile.png");
+    Texture2D enemyTex = LoadTexture("enemy.png");
+
+    SetTargetFPS(60);
+
+    float px = windowX / 2;
+    float py = windowY / 2;
+
+    diff = Practise;
+    difficultySelector(diff);
+    InitLevelSystem();
+    LoadWorld(0);
+
+    while (!WindowShouldClose()) {
+        float dt = GetFrameTime();
+        UpdateMusicStream(music);
+
+        windowX = (float)GetRenderWidth();
+        windowY = (float)GetRenderHeight();
+
+        if (IsKeyPressed(KEY_P)) {
+            state = (state == Paused) ? GameState : Paused;
+            PlaySound(click);
+        }
+
+        if (state == GameState) {
+            if (numberOfCircles >= 5 && !boss.isActive) {
+                InitBoss();
+            }
+
+            if (boss.isActive) {
+                Vector2 playerPos = {px, py};
+                Vector2 dir = Vector2Normalize(Vector2Subtract(playerPos, boss.pos));
+                boss.pos = Vector2Add(boss.pos, Vector2Scale(dir, boss.speed * dt));
+
+                float distToBoss = Vector2Distance(playerPos, boss.pos);
+                if (distToBoss <= 64 && IsKeyPressed(KEY_F)) {
+                    boss.health--;
+                    PlaySound(hurt);
+                    AddXP(50);
+                }
+
+                if (boss.health <= 0) {
+                    boss.isActive = false;
+                    currentWorld++;
+                    if (currentWorld < MAX_WORLDS) {
+                        LoadWorld(currentWorld);
+                        AddXP(100);
+                    } else {
+                        state = Menu;
+                    }
+                }
+            }
+
+            // Apple pickup
+            for (int i = 0; i < apples.number; i++) {
+                if (!apples.used[i]) {
+                    Rectangle playerRec = {px, py, (float)player.width, (float)player.height};
+                    Rectangle appleRec = {(float)apples.x[i], (float)apples.y[i], (float)apple.width, (float)apple.height};
+                    if (CheckCollisionRecs(playerRec, appleRec)) {
+                        apples.used[i] = true;
+                        numberOfCircles++;
+                        PlaySound(eat);
+                        AddXP(10);
+                    }
+                }
+            }
+
+            // Simple enemy AI: move towards player at speed scaled by level
+            for (int i = 0; i < enemies.number; i++) {
+                Vector2 enemyPos = {(float)enemies.x[i], (float)enemies.y[i]};
+                Vector2 playerPos = {px, py};
+                Vector2 direction = Vector2Normalize(Vector2Subtract(playerPos, enemyPos));
+                float enemySpeed = game.enemySpeedBase + game.level * 2.0f; // Speed up with level
+                enemyPos = Vector2Add(enemyPos, Vector2Scale(direction, enemySpeed * dt));
+                enemies.x[i] = (int)enemyPos.x;
+                enemies.y[i] = (int)enemyPos.y;
+
+                // Check collision with player (simplified)
+                Rectangle enemyRec = {(float)enemies.x[i], (float)enemies.y[i], (float)enemyTex.width, (float)enemyTex.height};
+                Rectangle playerRec = {px, py, (float)player.width, (float)player.height};
+                if (CheckCollisionRecs(enemyRec, playerRec)) {
+                    game.health--;
+                    PlaySound(hurt);
+                    // Knockback or cooldown can be added here
+                }
+            }
+
+            if (showLevelUp) {
+                levelUpTimer -= dt;
+                if (levelUpTimer <= 0.0f) {
+                    showLevelUp = false;
+                }
+            }
+        }
+
+        BeginDrawing();
+        ClearBackground(SKYBLUE);
+
+        if (state == GameState || state == Dead) {
+            if (bg.id > 0) DrawTexture(bg, 0, 0, WHITE);
+            else ClearBackground(DARKGRAY);
+
+            for (int i = 0; i < apples.number; i++) {
+                if (!apples.used[i]) DrawTexture(apple, (int)apples.x[i], (int)apples.y[i], WHITE);
+            }
+
+            // Draw enemies with simple health bar above them
+            for (int i = 0; i < enemies.number; i++) {
+                DrawTexture(enemyTex, enemies.x[i], enemies.y[i], WHITE);
+                // Health bar
+                float healthRatio = (float)enemies.health[i] / (float)enemies.maxHealth[i];
+                DrawRectangle(enemies.x[i], enemies.y[i] - 10, (int)(enemyTex.width * healthRatio), 5, RED);
+                DrawRectangleLines(enemies.x[i], enemies.y[i] - 10, enemyTex.width, 5, BLACK);
+            }
+
+            DrawTexture(player, (int)px, (int)py, WHITE);
+
+            if (boss.isActive) {
+                DrawTexture(boss.sprite, (int)boss.pos.x, (int)boss.pos.y, WHITE);
+                // Boss health bar
+                float bossHealthRatio = (float)boss.health / (float)(5 + game.level * 2);
+                DrawRectangle((int)boss.pos.x, (int)boss.pos.y - 20, (int)(boss.sprite.width * bossHealthRatio), 10, MAROON);
+                DrawRectangleLines((int)boss.pos.x, (int)boss.pos.y - 20, boss.sprite.width, 10, BLACK);
+            }
+
+            // UI
+            DrawText(TextFormat("World: %i", currentWorld + 1), 10, 10, 20, DARKBLUE);
+            DrawText(TextFormat("Score: %i", numberOfCircles), 10, 40, 20, WHITE);
+            DrawText(TextFormat("Health: %i", game.health), 10, 70, 20, RED);
+
+            DrawText(TextFormat("Level: %d", game.level), 10, 100, 20, GOLD);
+
+            DrawRectangle(10, 130, 200, 20, DARKGRAY);
+            float xpRatio = (float)game.xp / (float)game.xpToNextLevel;
+            if (xpRatio > 1.0f) xpRatio = 1.0f;
+            DrawRectangle(10, 130, (int)(200 * xpRatio), 20, GREEN);
+            DrawText(TextFormat("%d / %d XP", game.xp, game.xpToNextLevel), 10, 155, 14, WHITE);
+
+            if (showLevelUp) {
+                DrawText("LEVEL UP!", windowX / 2 - 60, windowY / 2 - 50, 30, YELLOW);
+            }
+        }
+
+        if (state == Menu) {
+            ClearBackground(BLACK);
+            DrawText("MENU - Press Enter to Play", windowX / 2 - 100, windowY / 2, 20, LIGHTGRAY);
+            if (IsKeyPressed(KEY_ENTER)) {
+                state = GameState;
+                numberOfCircles = 0;
+                px = windowX / 2;
+                py = windowY / 2;
+                game.health = 10;
+                InitLevelSystem();
+                LoadWorld(0);
+            }
+        }
+
+        if (state == Paused) {
+            DrawText("PAUSED - Press P to Resume", windowX / 2 - 100, windowY / 2, 20, YELLOW);
+        }
+
+        EndDrawing();
+    }
+
+    UnloadTexture(player);
+    UnloadTexture(enemyTex);
+    if (boss.sprite.id > 0) UnloadTexture(boss.sprite);
+    UnloadTexture(bg);
+    UnloadMusicStream(music);
+    CloseAudioDevice();
+    CloseWindow();
+
+    return 0;
+}
