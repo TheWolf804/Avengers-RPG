@@ -1,0 +1,233 @@
+#include <raylib.h>
+#include <raymath.h>
+#include <stdlib.h>
+#include <stdio.h>
+#include <math.h>
+#include <time.h>
+#include <string.h>
+
+#define MAX_BOMBS 0xFF
+#define MAX_APPLES 0xFF
+#define MAX_ENEMIES 0xFF
+#define MAX_WORLDS 8
+#define MAX_LEVEL 60
+
+// Game states
+typedef enum State {
+    GameState,
+    Dead,
+    Menu,
+    Settings,
+    Submenu,
+    Back,
+    Paused
+} State;
+
+// Difficulty levels
+typedef enum Difficulty {
+    Practise,
+    Easy,
+    Normal,
+    Hard,
+    Insane,
+    Nightmare,
+    Deathwish,
+    Armagedon
+} Difficulty;
+
+// Track player's game data
+typedef struct GameData {
+    int health;
+    float playerSpeed;
+    float enemySpeedBase;
+    float bombInterval;
+    float bombTimer;
+    float appleTotal;
+    float enemyTotal;
+    int level;
+    int xp;
+    int xpToNextLevel;
+    float appleHealAmount;
+} GameData;
+
+// Track save data and unlocks
+typedef struct Progress {
+    bool worldBeaten[MAX_WORLDS];
+    Difficulty beatenDifficulty[MAX_WORLDS];
+    bool knightmareUnlocked;
+} Progress;
+
+// Game objects
+typedef struct Bomb {
+    float x[MAX_BOMBS], y[MAX_BOMBS];
+    int number;
+    bool used[MAX_BOMBS];
+} Bomb;
+
+typedef struct Apple {
+    float x[MAX_APPLES], y[MAX_APPLES];
+    int number;
+    bool used[MAX_APPLES];
+} Apple;
+
+typedef struct Enemy {
+    int x[MAX_ENEMIES], y[MAX_ENEMIES];
+    int health[MAX_ENEMIES];
+    int maxHealth[MAX_ENEMIES];
+    int number;
+} Enemy;
+
+typedef struct World {
+    int id;
+    Texture2D background;
+    int enemyCount;
+    bool bossFightStarted;
+} World;
+
+typedef struct Boss {
+    Vector2 pos;
+    int health;
+    bool isActive;
+    float speed;
+    Texture2D sprite;
+} Boss;
+
+// Global variables
+State state = Menu;
+Difficulty diff = Practise;
+GameData game;
+Progress progress;
+Apple apples;
+Bomb bombs;
+Enemy enemies;
+World worlds[MAX_WORLDS];
+Boss boss;
+
+float windowX = 800, windowY = 600;
+int currentWorld = 0;
+int numberOfCircles = 0;
+
+bool showLevelUp = false;
+float levelUpTimer = 0.0f;
+
+Sound click, eat, hurt, explosion;
+Texture2D plank, brick, grass, apple, bomb, bg, fruit;
+Texture2D player, enemyTex;
+Music music;
+
+// Save/load
+void SaveProgress() {
+    FILE *fp = fopen("progress.sav", "wb");
+    if (fp) {
+        fwrite(&progress, sizeof(Progress), 1, fp);
+        fclose(fp);
+    }
+}
+
+void LoadProgress() {
+    FILE *fp = fopen("progress.sav", "rb");
+    if (fp) {
+        fread(&progress, sizeof(Progress), 1, fp);
+        fclose(fp);
+    } else {
+        memset(&progress, 0, sizeof(Progress));
+    }
+}
+
+void CheckKnightmareUnlock() {
+    bool allCleared = true;
+    for (int i = 0; i < MAX_WORLDS; i++) {
+        if (!progress.worldBeaten[i] || progress.beatenDifficulty[i] < Normal) {
+            allCleared = false;
+            break;
+        }
+    }
+    if (allCleared && !progress.knightmareUnlocked) {
+        progress.knightmareUnlocked = true;
+        printf("Knightmare Mode Unlocked!\n");
+        SaveProgress();
+    }
+}
+
+void InitLevelSystem() {
+    game.level = 1;
+    game.xp = 0;
+    game.xpToNextLevel = 100;
+}
+
+void UpdateEnemyStats() {
+    for (int i = 0; i < enemies.number; i++) {
+        int baseHealth = 3 + game.level;
+        if (diff == Nightmare) baseHealth *= 2;
+        enemies.maxHealth[i] = baseHealth;
+        enemies.health[i] = enemies.maxHealth[i];
+    }
+}
+
+void AddXP(int amount) {
+    if (game.level >= MAX_LEVEL) {
+        if (game.xp + amount > game.xpToNextLevel) game.xp = game.xpToNextLevel;
+        else game.xp += amount;
+        return;
+    }
+    game.xp += amount;
+    while (game.xp >= game.xpToNextLevel && game.level < MAX_LEVEL) {
+        game.xp -= game.xpToNextLevel;
+        game.level++;
+        game.xpToNextLevel = (int)(game.xpToNextLevel * 1.5f);
+
+        if (diff != Nightmare) {
+            game.health++;
+            game.playerSpeed += 10.0f;
+        } else {
+            game.health += 0;  // No free health on level up in Knightmare
+            game.playerSpeed += 2.0f;  // Smaller gains
+        }
+
+        game.enemySpeedBase += 5.0f;
+        UpdateEnemyStats();
+
+        PlaySound(click);
+        showLevelUp = true;
+        levelUpTimer = 2.0f;
+
+        if (game.level >= MAX_LEVEL) game.xp = game.xpToNextLevel;
+    }
+}
+
+void difficultySelector(Difficulty diff) {
+    switch (diff) {
+        case Practise:
+            game.health = 10;
+            game.playerSpeed = 200.0f;
+            game.enemySpeedBase = 60.0f;
+            game.appleHealAmount = 3.0f;
+            break;
+        case Easy:
+            game.health = 8;
+            game.playerSpeed = 180.0f;
+            game.enemySpeedBase = 80.0f;
+            game.appleHealAmount = 2.0f;
+            break;
+        case Normal:
+            game.health = 6;
+            game.playerSpeed = 150.0f;
+            game.enemySpeedBase = 100.0f;
+            game.appleHealAmount = 2.0f;
+            break;
+        case Nightmare:
+            game.health = 3;
+            game.playerSpeed = 100.0f; // much slower
+            game.enemySpeedBase = 150.0f; // much faster enemies
+            game.appleHealAmount = 0.5f; // very weak healing
+            break;
+        default:
+            game.health = 4;
+            game.playerSpeed = 140.0f;
+            game.enemySpeedBase = 120.0f;
+            game.appleHealAmount = 1.0f;
+            break;
+    }
+}
+
+// The rest of the game logic remains unchanged
