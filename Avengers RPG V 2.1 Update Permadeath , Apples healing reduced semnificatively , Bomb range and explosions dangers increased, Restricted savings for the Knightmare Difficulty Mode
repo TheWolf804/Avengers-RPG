@@ -1,0 +1,189 @@
+// Updated with full Knightmare difficulty, permadeath, and save restriction
+#include <raylib.h>
+#include <raymath.h>
+#include <stdlib.h>
+#include <stdio.h>
+#include <math.h>
+#include <time.h>
+#include <string.h>
+
+// ... (same enum declarations as before)
+
+#define MAX_LEVEL_NORMAL 20
+#define MAX_LEVEL_KNIGHTMARE 60
+
+bool knightmareUnlocked = false;
+bool isKnightmare = false;
+bool saveAllowed = true;
+
+// Save/load file
+#define SAVE_FILE "progress.sav"
+
+// New: Adjust level cap based on difficulty
+int GetMaxLevel() {
+    return (diff == Nightmare) ? MAX_LEVEL_KNIGHTMARE : MAX_LEVEL_NORMAL;
+}
+
+// Update difficulty selector for Knightmare
+void difficultySelector(Difficulty diff) {
+    switch (diff) {
+        case Practise:
+            game.health = 10;
+            game.playerSpeed = 200.0f;
+            game.enemySpeedBase = 60.0f;
+            break;
+        case Easy:
+            game.health = 8;
+            game.playerSpeed = 180.0f;
+            game.enemySpeedBase = 80.0f;
+            break;
+        case Nightmare:
+            game.health = 3;
+            game.playerSpeed = 110.0f;
+            game.enemySpeedBase = 160.0f;
+            isKnightmare = true;
+            saveAllowed = false;
+            break;
+        default:
+            game.health = 5;
+            game.playerSpeed = 150.0f;
+            game.enemySpeedBase = 100.0f;
+            break;
+    }
+}
+
+// Update InitLevelSystem to use dynamic cap
+void InitLevelSystem() {
+    game.level = 1;
+    game.xp = 0;
+    game.xpToNextLevel = 100;
+}
+
+// Update AddXP for Knightmare constraints
+void AddXP(int amount) {
+    int maxLevel = GetMaxLevel();
+    if (game.level >= maxLevel) {
+        game.xp = game.xpToNextLevel;
+        return;
+    }
+
+    game.xp += amount;
+    while (game.xp >= game.xpToNextLevel && game.level < maxLevel) {
+        game.xp -= game.xpToNextLevel;
+        game.level++;
+        game.xpToNextLevel = (int)(game.xpToNextLevel * 1.5f);
+
+        if (!isKnightmare) {
+            game.health += 1;
+            game.playerSpeed += 10.0f;
+        } else {
+            game.playerSpeed += 2.0f;
+        }
+        game.enemySpeedBase += 5.0f;
+
+        UpdateEnemyStats();
+        PlaySound(click);
+        showLevelUp = true;
+        levelUpTimer = 2.0f;
+
+        if (game.level >= maxLevel) {
+            game.xp = game.xpToNextLevel;
+            break;
+        }
+    }
+}
+
+void UpdateEnemyStats() {
+    for (int i = 0; i < enemies.number; i++) {
+        enemies.maxHealth[i] = (isKnightmare ? 6 : 3) + game.level * (isKnightmare ? 2 : 1);
+        enemies.health[i] = enemies.maxHealth[i];
+    }
+}
+
+void InitBoss() {
+    if (boss.sprite.id > 0) UnloadTexture(boss.sprite);
+    boss.pos = (Vector2){ GetRandomValue(100, (int)windowX - 100), GetRandomValue(100, (int)windowY - 100) };
+    boss.health = (isKnightmare ? 10 : 5) + game.level * (isKnightmare ? 4 : 2);
+    boss.isActive = true;
+    boss.speed = 100.0f + game.level * (isKnightmare ? 10.0f : 5.0f);
+    boss.sprite = LoadTexture("boss.png");
+}
+
+// Save and load functions
+void SaveProgress() {
+    if (!saveAllowed) return;
+
+    FILE *file = fopen(SAVE_FILE, "wb");
+    if (file) {
+        fwrite(&knightmareUnlocked, sizeof(bool), 1, file);
+        fclose(file);
+    }
+}
+
+void LoadProgress() {
+    FILE *file = fopen(SAVE_FILE, "rb");
+    if (file) {
+        fread(&knightmareUnlocked, sizeof(bool), 1, file);
+        fclose(file);
+    } else {
+        knightmareUnlocked = false;
+    }
+}
+
+// Apply permadeath logic
+void CheckPermadeath() {
+    if (game.health <= 0 && isKnightmare) {
+        state = Dead;
+        knightmareUnlocked = false; // optional: remove unlock if dead
+    }
+}
+
+// In your main loop:
+if (game.health <= 0) {
+    if (isKnightmare) {
+        knightmareUnlocked = false;
+        remove(SAVE_FILE); // delete progress
+    }
+    state = Dead;
+}
+
+// Apple pickup changes:
+if (CheckCollisionRecs(playerRec, appleRec)) {
+    apples.used[i] = true;
+    numberOfCircles++;
+    PlaySound(eat);
+    AddXP(10);
+    if (!isKnightmare) game.health++;
+    else game.health += 0.5f;
+}
+
+// Optionally draw Knightmare UI indicators:
+if (isKnightmare) {
+    DrawText("KNIGHTMARE MODE", windowX / 2 - 80, 20, 24, RED);
+}
+
+// Unlock Knightmare after all worlds
+if (currentWorld >= MAX_WORLDS && !isKnightmare) {
+    knightmareUnlocked = true;
+    SaveProgress();
+}
+
+// Menu UI:
+if (state == Menu) {
+    DrawText("MENU - Press Enter to Play", windowX / 2 - 100, windowY / 2, 20, LIGHTGRAY);
+    if (knightmareUnlocked) {
+        DrawText("Press K for Knightmare", windowX / 2 - 100, windowY / 2 + 40, 20, RED);
+        if (IsKeyPressed(KEY_K)) {
+            diff = Nightmare;
+            difficultySelector(diff);
+            InitLevelSystem();
+            LoadWorld(0);
+            state = GameState;
+        }
+    }
+}
+
+// Load progress at the start of main()
+LoadProgress();
+
+// Call SaveProgress() when game ends normally (non-Knightmare)
