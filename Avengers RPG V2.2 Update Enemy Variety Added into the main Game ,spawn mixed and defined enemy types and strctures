@@ -1,0 +1,493 @@
+#include <raylib.h>
+#include <raymath.h>   // For Vector2 helper functions
+#include <stdlib.h>
+#include <stdio.h>
+#include <math.h>
+#include <time.h>
+#include <stdbool.h>
+
+typedef enum State {
+    GameState,
+    Dead,
+    Menu,
+    Settings,
+    Submenu,
+    Back,
+    Paused
+} State;
+
+typedef enum Difficulty {
+    Practise,
+    Easy,
+    Normal,
+    Hard,
+    Insane,
+    Nightmare,
+    Deathwish,
+    Armagedon
+} Difficulty;
+
+typedef enum EnemyType {
+    ENEMY_TYPE_BASIC,
+    ENEMY_TYPE_FAST,
+    ENEMY_TYPE_TANK,
+    ENEMY_TYPE_BOMBER,
+    ENEMY_TYPE_COUNT
+} EnemyType;
+
+typedef struct EnemyStats {
+    int baseHealth;
+    float baseSpeed;
+    int damage;
+    Texture2D texture;
+} EnemyStats;
+
+typedef struct GameData {
+    int health;
+    float playerSpeed;
+    float enemySpeedBase;
+    float bombInterval;
+    float bombTimer;
+    float appleTotal;
+    float enemyTotal;
+
+    // Level system
+    int level;
+    int xp;
+    int xpToNextLevel;
+} GameData;
+
+#define MAX_BOMBS 0xFF
+#define MAX_APPLES 0xFF
+#define MAX_ENEMIES 0xFF
+#define MAX_WORLDS 8
+#define MAX_LEVEL 20
+
+typedef struct Bomb {
+    float x[MAX_BOMBS], y[MAX_BOMBS];
+    int number;
+    bool used[MAX_BOMBS];
+} Bomb;
+
+typedef struct Apple {
+    float x[MAX_APPLES], y[MAX_APPLES];
+    int number;
+    bool used[MAX_APPLES];
+} Apple;
+
+typedef struct Enemy {
+    int x, y;
+    int health;
+    EnemyType type;
+    bool active;
+} Enemy;
+
+typedef struct World {
+    int id;
+    Texture2D background;
+    int enemyCount;
+    bool bossFightStarted;
+} World;
+
+typedef struct Boss {
+    Vector2 pos;
+    int health;
+    bool isActive;
+    float speed;
+    Texture2D sprite;
+} Boss;
+
+// Globals
+State state = Menu;
+Difficulty diff = Practise;
+
+GameData game;
+Apple apples;
+Bomb bombs;
+Enemy enemies[MAX_ENEMIES];
+EnemyStats enemyStats[ENEMY_TYPE_COUNT];
+
+float windowX = 800, windowY = 600;
+int numberOfCircles = 0;
+
+Sound click, eat, hurt, explosion;
+Texture2D plank, brick, grass, apple, bomb;
+Texture2D bg;
+Texture2D playerTex;
+Music music;
+
+World worlds[MAX_WORLDS];
+int currentWorld = 0;
+Boss boss;
+
+// Level up display timer and flag
+bool showLevelUp = false;
+float levelUpTimer = 0.0f;
+
+// Helper functions
+float sigmoid(float x) {
+    return 1.0f / (1 + expf(-x));
+}
+
+// Initialize base stats and textures for enemy types
+void InitEnemyStats() {
+    enemyStats[ENEMY_TYPE_BASIC] = (EnemyStats){ 3, 50.0f, 1, LoadTexture("enemy_basic.png") };
+    enemyStats[ENEMY_TYPE_FAST]  = (EnemyStats){ 2, 100.0f, 1, LoadTexture("enemy_fast.png") };
+    enemyStats[ENEMY_TYPE_TANK]  = (EnemyStats){ 6, 30.0f, 2, LoadTexture("enemy_tank.png") };
+    enemyStats[ENEMY_TYPE_BOMBER] = (EnemyStats){ 3, 40.0f, 3, LoadTexture("enemy_bomber.png") };
+}
+
+void UnloadEnemyStatsTextures() {
+    for (int i = 0; i < ENEMY_TYPE_COUNT; i++) {
+        if (enemyStats[i].texture.id > 0) UnloadTexture(enemyStats[i].texture);
+    }
+}
+
+void difficultySelector(Difficulty diff) {
+    switch (diff) {
+        case Practise:
+            game.health = 10;
+            game.playerSpeed = 200.0f;
+            game.enemySpeedBase = 60.0f;
+            break;
+        case Easy:
+            game.health = 8;
+            game.playerSpeed = 180.0f;
+            game.enemySpeedBase = 80.0f;
+            break;
+        case Normal:
+            game.health = 5;
+            game.playerSpeed = 150.0f;
+            game.enemySpeedBase = 100.0f;
+            break;
+        case Nightmare:
+            game.health = 3; // Reduced player health for Knightmare
+            game.playerSpeed = 100.0f; // Reduced player speed
+            game.enemySpeedBase = 150.0f; // Very aggressive enemies
+            break;
+        default:
+            game.health = 5;
+            game.playerSpeed = 150.0f;
+            game.enemySpeedBase = 100.0f;
+            break;
+    }
+}
+
+// XP and leveling system functions
+
+void InitLevelSystem() {
+    game.level = 1;
+    game.xp = 0;
+    if (diff == Nightmare) {
+        game.xpToNextLevel = 200;  // Slower progression for Knightmare
+    } else {
+        game.xpToNextLevel = 100;
+    }
+}
+
+void UpdateEnemyStats() {
+    // Scale enemy health by level and difficulty
+    for (int i = 0; i < MAX_ENEMIES; i++) {
+        if (!enemies[i].active) continue;
+
+        int baseHealth = enemyStats[enemies[i].type].baseHealth;
+
+        if (diff == Nightmare) {
+            enemies[i].health = baseHealth + game.level * 5; // High scaling in Knightmare
+        } else {
+            enemies[i].health = baseHealth + game.level;
+        }
+    }
+}
+
+void AddXP(int amount) {
+    int maxLevel = (diff == Nightmare) ? 60 : MAX_LEVEL;
+
+    if (game.level >= maxLevel) {
+        if (game.xp + amount > game.xpToNextLevel) {
+            game.xp = game.xpToNextLevel;
+        } else {
+            game.xp += amount;
+        }
+        return;
+    }
+
+    game.xp += amount;
+
+    while (game.xp >= game.xpToNextLevel && game.level < maxLevel) {
+        game.xp -= game.xpToNextLevel;
+        game.level++;
+        game.xpToNextLevel = (int)(game.xpToNextLevel * 1.5f);
+
+        // Stat changes on level up
+        if (diff == Nightmare) {
+            game.health += 1; // Could be balanced or removed
+            game.playerSpeed -= 1.0f; // Slight reduction for challenge
+            game.enemySpeedBase += 10.0f;
+        } else {
+            game.health += 1;
+            game.playerSpeed += 10.0f;
+            game.enemySpeedBase += 5.0f;
+        }
+
+        UpdateEnemyStats();
+
+        PlaySound(click);
+        showLevelUp = true;
+        levelUpTimer = 2.0f;
+
+        if (game.level >= maxLevel) {
+            game.xp = game.xpToNextLevel;
+            break;
+        }
+    }
+}
+
+void SpawnEnemy(int x, int y, EnemyType type) {
+    for (int i = 0; i < MAX_ENEMIES; i++) {
+        if (!enemies[i].active) {
+            enemies[i].x = x;
+            enemies[i].y = y;
+            enemies[i].type = type;
+            int baseHealth = enemyStats[type].baseHealth;
+            enemies[i].health = (diff == Nightmare) ? baseHealth + game.level * 5 : baseHealth + game.level;
+            enemies[i].active = true;
+            break;
+        }
+    }
+}
+
+void SpawnEnemiesForWorld(int world) {
+    // Clear existing enemies
+    for (int i = 0; i < MAX_ENEMIES; i++) enemies[i].active = false;
+
+    int enemyCount = 10 + world * 2;
+
+    for (int i = 0; i < enemyCount; i++) {
+        int x = GetRandomValue(0, (int)windowX - 64);
+        int y = GetRandomValue(0, (int)windowY - 64);
+
+        EnemyType type;
+        int rnd = GetRandomValue(0, 100);
+        if (rnd < 50) type = ENEMY_TYPE_BASIC;
+        else if (rnd < 75) type = ENEMY_TYPE_FAST;
+        else if (rnd < 90) type = ENEMY_TYPE_TANK;
+        else type = ENEMY_TYPE_BOMBER;
+
+        SpawnEnemy(x, y, type);
+    }
+}
+
+void LoadWorld(int id) {
+    currentWorld = id;
+
+    if (bg.id > 0) UnloadTexture(bg);
+
+    switch (id) {
+        case 0:
+            bg = LoadTexture("world0_bg.png");
+            game.appleTotal = 5;
+            break;
+        default:
+            bg = LoadTexture("default_bg.png");
+            game.appleTotal = 3;
+            break;
+    }
+
+    apples.number = (int)game.appleTotal;
+    for (int i = 0; i < apples.number; i++) {
+        apples.x[i] = GetRandomValue(0, (int)windowX);
+        apples.y[i] = GetRandomValue(0, (int)windowY);
+        apples.used[i] = false;
+    }
+
+    bombs.number = 0;
+    for (int i = 0; i < MAX_BOMBS; i++) bombs.used[i] = false;
+
+    boss.isActive = false;
+
+    SpawnEnemiesForWorld(id);
+
+    UpdateEnemyStats();
+
+    printf("World %d loaded\n", id);
+}
+
+void InitBoss() {
+    if (boss.sprite.id > 0) UnloadTexture(boss.sprite);
+
+    boss.pos = (Vector2){ GetRandomValue(100, (int)windowX - 100), GetRandomValue(100, (int)windowY - 100) };
+    boss.health = (diff == Nightmare) ? 30 + game.level * 10 : 5 + game.level * 2;
+    boss.isActive = true;
+    boss.speed = (diff == Nightmare) ? 200.0f + game.level * 10.0f : 100.0f + game.level * 5.0f;
+    boss.sprite = LoadTexture("boss.png");
+}
+
+// -- Main Game Loop & Logic --
+
+int main(void) {
+    srand(time(NULL));
+
+    InitWindow((int)windowX, (int)windowY, "Knightmare Mode with Multiple Enemies");
+    InitAudioDevice();
+
+    // Load resources
+    playerTex = LoadTexture("player.png");
+    apple = LoadTexture("apple.png");
+    bomb = LoadTexture("bomb.png");
+
+    click = LoadSound("click.wav");
+    eat = LoadSound("eat.wav");
+    hurt = LoadSound("hurt.wav");
+    explosion = LoadSound("explosion.wav");
+
+    InitEnemyStats();
+
+    // Initialize game data & difficulty
+    diff = Nightmare; // Or set by menu selection
+    difficultySelector(diff);
+    InitLevelSystem();
+
+    LoadWorld(0);
+
+    Vector2 playerPos = { windowX / 2, windowY / 2 };
+    float playerSpeed = game.playerSpeed;
+
+    SetTargetFPS(60);
+
+    while (!WindowShouldClose()) {
+        float dt = GetFrameTime();
+
+        // Update level up timer display
+        if (showLevelUp) {
+            levelUpTimer -= dt;
+            if (levelUpTimer <= 0.0f) {
+                showLevelUp = false;
+            }
+        }
+
+        // Player input
+        Vector2 moveDir = { 0, 0 };
+        if (IsKeyDown(KEY_W)) moveDir.y -= 1;
+        if (IsKeyDown(KEY_S)) moveDir.y += 1;
+        if (IsKeyDown(KEY_A)) moveDir.x -= 1;
+        if (IsKeyDown(KEY_D)) moveDir.x += 1;
+
+        if (Vector2Length(moveDir) > 0) {
+            moveDir = Vector2Normalize(moveDir);
+            playerPos.x += moveDir.x * game.playerSpeed * dt;
+            playerPos.y += moveDir.y * game.playerSpeed * dt;
+        }
+
+        // Clamp player inside window
+        if (playerPos.x < 0) playerPos.x = 0;
+        if (playerPos.x > windowX - playerTex.width) playerPos.x = windowX - playerTex.width;
+        if (playerPos.y < 0) playerPos.y = 0;
+        if (playerPos.y > windowY - playerTex.height) playerPos.y = windowY - playerTex.height;
+
+        // Enemy logic
+        for (int i = 0; i < MAX_ENEMIES; i++) {
+            if (!enemies[i].active) continue;
+
+            EnemyStats stats = enemyStats[enemies[i].type];
+
+            Vector2 enemyPos = { (float)enemies[i].x, (float)enemies[i].y };
+            Vector2 direction = Vector2Normalize(Vector2Subtract(playerPos, enemyPos));
+            float enemySpeed = stats.baseSpeed + game.level * 5.0f;
+            if (diff == Nightmare) {
+                enemySpeed *= 1.5f;  // Make enemies even faster in Knightmare
+            }
+
+            enemyPos = Vector2Add(enemyPos, Vector2Scale(direction, enemySpeed * dt));
+            enemies[i].x = (int)enemyPos.x;
+            enemies[i].y = (int)enemyPos.y;
+
+            Rectangle enemyRec = { (float)enemies[i].x, (float)enemies[i].y, (float)stats.texture.width, (float)stats.texture.height };
+            Rectangle playerRec = { playerPos.x, playerPos.y, (float)playerTex.width, (float)playerTex.height };
+
+            if (CheckCollisionRecs(enemyRec, playerRec)) {
+                game.health -= stats.damage;
+                PlaySound(hurt);
+
+                // Knockback player or simple push back (optional)
+
+                if (game.health <= 0) {
+                    state = Dead;
+                    PlaySound(explosion);
+                }
+            }
+        }
+
+        // Apple consumption (heal)
+        for (int i = 0; i < apples.number; i++) {
+            if (apples.used[i]) continue;
+
+            Rectangle appleRec = { apples.x[i], apples.y[i], (float)apple.width, (float)apple.height };
+            Rectangle playerRec = { playerPos.x, playerPos.y, (float)playerTex.width, (float)playerTex.height };
+
+            if (CheckCollisionRecs(appleRec, playerRec)) {
+                apples.used[i] = true;
+                if (diff == Nightmare) {
+                    game.health += 1;  // Reduced healing on Knightmare
+                } else {
+                    game.health += 3;
+                }
+                PlaySound(eat);
+                if (game.health > 10) game.health = 10;
+            }
+        }
+
+        // Bomb update omitted for brevity, but should also consider Knightmare bomb damage & speed
+
+        // Draw everything
+        BeginDrawing();
+        ClearBackground(RAYWHITE);
+
+        DrawTexture(bg, 0, 0, WHITE);
+        DrawTexture(playerTex, (int)playerPos.x, (int)playerPos.y, WHITE);
+
+        // Draw apples
+        for (int i = 0; i < apples.number; i++) {
+            if (!apples.used[i]) DrawTexture(apple, (int)apples.x[i], (int)apples.y[i], WHITE);
+        }
+
+        // Draw enemies
+        for (int i = 0; i < MAX_ENEMIES; i++) {
+            if (!enemies[i].active) continue;
+            DrawTexture(enemyStats[enemies[i].type].texture, enemies[i].x, enemies[i].y, WHITE);
+        }
+
+        // Draw health and level
+        DrawText(TextFormat("Health: %d", game.health), 10, 10, 20, RED);
+        DrawText(TextFormat("Level: %d  XP: %d/%d", game.level, game.xp, game.xpToNextLevel), 10, 40, 20, BLUE);
+
+        if (showLevelUp) {
+            DrawText("LEVEL UP!", windowX/2 - 80, windowY/2 - 40, 40, GREEN);
+        }
+
+        EndDrawing();
+
+        if (state == Dead) break;
+
+        // Artificially add XP for testing:
+        //AddXP(1); 
+    }
+
+    // Cleanup
+    UnloadTexture(playerTex);
+    UnloadTexture(apple);
+    UnloadTexture(bomb);
+    UnloadTexture(bg);
+
+    UnloadEnemyStatsTextures();
+
+    UnloadSound(click);
+    UnloadSound(eat);
+    UnloadSound(hurt);
+    UnloadSound(explosion);
+
+    CloseAudioDevice();
+    CloseWindow();
+
+    return 0;
+}
