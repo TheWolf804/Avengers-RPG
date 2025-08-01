@@ -1,0 +1,312 @@
+#include <raylib.h>
+#include <raymath.h>
+#include <stdlib.h>
+#include <stdio.h>
+#include <math.h>
+#include <stdbool.h>
+#include <string.h>
+
+#define MAX_BOMBS 255
+#define MAX_APPLES 255
+#define MAX_ENEMIES 255
+#define MAX_WORLDS 8
+#define MAX_LEVEL 60
+
+typedef enum State {
+    GameState,
+    Dead,
+    Menu,
+    Settings,
+    Paused
+} State;
+
+typedef enum Difficulty {
+    Practise,
+    Easy,
+    Normal,
+    Hard,
+    Insane,
+    Nightmare,
+    Deathwish,
+    Armagedon
+} Difficulty;
+
+typedef struct GameData {
+    int health;
+    float playerSpeed;
+    float enemySpeedBase;
+    float bombInterval;
+    float bombTimer;
+    float appleTotal;
+    float enemyTotal;
+    int level;
+    int xp;
+    int xpToNextLevel;
+    bool permadeath;
+    bool enemyUpscaling;
+} GameData;
+
+typedef struct Bomb {
+    float x[MAX_BOMBS], y[MAX_BOMBS];
+    int number;
+    bool used[MAX_BOMBS];
+} Bomb;
+
+typedef struct Apple {
+    float x[MAX_APPLES], y[MAX_APPLES];
+    int number;
+    bool used[MAX_APPLES];
+} Apple;
+
+typedef struct Enemy {
+    int x[MAX_ENEMIES], y[MAX_ENEMIES];
+    int health[MAX_ENEMIES];
+    int maxHealth[MAX_ENEMIES];
+    int type[MAX_ENEMIES];
+    int number;
+} Enemy;
+
+typedef struct World {
+    int id;
+    Texture2D background;
+    int hazardType;
+} World;
+
+typedef struct Boss {
+    Vector2 pos;
+    int health;
+    bool isActive;
+    float speed;
+    Texture2D sprite;
+} Boss;
+
+State state = Menu;
+Difficulty diff = Practise;
+
+GameData game;
+Apple apples;
+Bomb bombs;
+Enemy enemies;
+
+float windowX = 800, windowY = 600;
+
+Sound click, eat, hurt, explosion;
+Texture2D plank, brick, apple, bomb, fruit;
+Texture2D bg, customMenuBG;
+Texture2D bossTex;
+Music music;
+
+World worlds[MAX_WORLDS];
+int currentWorld = 0;
+Boss boss;
+
+bool showLevelUp = false;
+float levelUpTimer = 0.0f;
+char selectedMenuBGPath[256] = "default_menu_bg.png";
+bool menuBackgroundLoaded = false;
+
+void LoadMenuBackground() {
+    if (menuBackgroundLoaded) UnloadTexture(customMenuBG);
+    customMenuBG = LoadTexture(selectedMenuBGPath);
+    menuBackgroundLoaded = true;
+}
+
+void difficultySelector(Difficulty diff) {
+    switch (diff) {
+        case Practise:
+            game.health = 10;
+            game.playerSpeed = 200.0f;
+            game.enemySpeedBase = 60.0f;
+            game.permadeath = false;
+            game.enemyUpscaling = false;
+            break;
+        case Nightmare:
+            game.health = 3;
+            game.playerSpeed = 120.0f;
+            game.enemySpeedBase = 150.0f;
+            game.permadeath = true;
+            game.enemyUpscaling = true;
+            break;
+        default:
+            game.health = 5;
+            game.playerSpeed = 150.0f;
+            game.enemySpeedBase = 100.0f;
+            game.permadeath = false;
+            game.enemyUpscaling = true;
+            break;
+    }
+}
+
+void InitLevelSystem() {
+    game.level = 1;
+    game.xp = 0;
+    game.xpToNextLevel = 100;
+}
+
+void AddXP(int amount) {
+    if (game.level >= MAX_LEVEL) return;
+    game.xp += amount;
+    while (game.xp >= game.xpToNextLevel) {
+        game.xp -= game.xpToNextLevel;
+        game.level++;
+        game.xpToNextLevel *= 1.5f;
+        if (game.enemyUpscaling) game.enemySpeedBase += 3.0f;
+        game.health++;
+        showLevelUp = true;
+        levelUpTimer = 2.0f;
+    }
+}
+
+void UpdateEnemyStats() {
+    for (int i = 0; i < enemies.number; i++) {
+        int base = (enemies.type[i] == 1) ? 2 : (enemies.type[i] == 2) ? 6 : 3;
+        enemies.maxHealth[i] = base + (game.enemyUpscaling ? game.level : 0);
+        enemies.health[i] = enemies.maxHealth[i];
+    }
+}
+
+void SpawnEnemies(int count) {
+    enemies.number = count;
+    for (int i = 0; i < count; i++) {
+        enemies.x[i] = GetRandomValue(0, windowX);
+        enemies.y[i] = GetRandomValue(0, windowY);
+        enemies.type[i] = GetRandomValue(0, 3);
+    }
+    UpdateEnemyStats();
+}
+
+void LoadWorld(int id) {
+    currentWorld = id;
+    if (bg.id > 0) UnloadTexture(bg);
+    switch (id) {
+        case 0: bg = LoadTexture("world0_bg.png"); worlds[id].hazardType = 0; break;
+        case 1: bg = LoadTexture("world_lava.png"); worlds[id].hazardType = 1; break;
+        case 2: bg = LoadTexture("world_ice.png"); worlds[id].hazardType = 2; break;
+        case 3: bg = LoadTexture("world_sandstorm.png"); worlds[id].hazardType = 3; break;
+        default: bg = LoadTexture("default_bg.png"); worlds[id].hazardType = 0; break;
+    }
+    game.appleTotal = 5;
+    SpawnEnemies(10);
+    for (int i = 0; i < MAX_APPLES; i++) {
+        apples.used[i] = false;
+        apples.x[i] = GetRandomValue(0, windowX);
+        apples.y[i] = GetRandomValue(0, windowY);
+    }
+}
+
+int main() {
+    InitWindow(windowX, windowY, "Knightmare Mode Game");
+    InitAudioDevice();
+    SetTargetFPS(60);
+
+    click = LoadSound("click.ogg");
+    eat = LoadSound("eat.wav");
+    hurt = LoadSound("hurt.wav");
+    explosion = LoadSound("explosion.wav");
+    plank = LoadTexture("plank.png");
+    brick = LoadTexture("brick.png");
+    apple = LoadTexture("apple.png");
+    bomb = LoadTexture("bomb.png");
+    fruit = LoadTexture("fruit.png");
+
+    strcpy(selectedMenuBGPath, "default_menu_bg.png");
+    LoadMenuBackground();
+    difficultySelector(Nightmare);
+    InitLevelSystem();
+    LoadWorld(1);
+
+    Vector2 playerPos = {windowX / 2, windowY / 2};
+
+    while (!WindowShouldClose()) {
+        BeginDrawing();
+        ClearBackground(BLACK);
+
+        switch (state) {
+            case Menu:
+                DrawTexture(customMenuBG, 0, 0, WHITE);
+                DrawText("Menu - Press ENTER to Play", 100, 100, 20, WHITE);
+                DrawText(TextFormat("Enemy Upscaling: %s", game.enemyUpscaling ? "ON" : "OFF"), 100, 150, 20, LIGHTGRAY);
+                DrawText(TextFormat("Background: %s", selectedMenuBGPath), 100, 180, 20, LIGHTGRAY);
+                if (IsKeyPressed(KEY_RIGHT)) strcpy(selectedMenuBGPath, "menu_bg1.png");
+                if (IsKeyPressed(KEY_LEFT)) strcpy(selectedMenuBGPath, "menu_bg2.png");
+                if (IsKeyPressed(KEY_U)) game.enemyUpscaling = !game.enemyUpscaling;
+                if (IsKeyPressed(KEY_ENTER)) {
+                    PlaySound(click);
+                    LoadMenuBackground();
+                    LoadWorld(currentWorld);
+                    state = GameState;
+                }
+                break;
+
+            case GameState:
+                DrawTexture(bg, 0, 0, WHITE);
+                DrawCircleV(playerPos, 10, GREEN);
+                for (int i = 0; i < enemies.number; i++) {
+                    if (enemies.health[i] > 0) {
+                        Color color = (enemies.type[i] == 1) ? RED : (enemies.type[i] == 2) ? GRAY : ORANGE;
+                        DrawRectangle(enemies.x[i], enemies.y[i], 20, 20, color);
+                    }
+                }
+                DrawText(TextFormat("HP: %d | LVL: %d", game.health, game.level), 10, 10, 20, WHITE);
+                if (showLevelUp) {
+                    DrawText("LEVEL UP!", windowX / 2 - 50, windowY / 2, 30, YELLOW);
+                    levelUpTimer -= GetFrameTime();
+                    if (levelUpTimer <= 0) showLevelUp = false;
+                }
+                if (IsKeyDown(KEY_W)) playerPos.y -= game.playerSpeed * GetFrameTime();
+                if (IsKeyDown(KEY_S)) playerPos.y += game.playerSpeed * GetFrameTime();
+                if (IsKeyDown(KEY_A)) playerPos.x -= game.playerSpeed * GetFrameTime();
+                if (IsKeyDown(KEY_D)) playerPos.x += game.playerSpeed * GetFrameTime();
+                for (int i = 0; i < enemies.number; i++) {
+                    Vector2 enemyPos = {enemies.x[i], enemies.y[i]};
+                    float speed = game.enemySpeedBase;
+                    if (enemies.type[i] == 1) speed *= 1.5f;
+                    if (enemies.health[i] > 0) {
+                        Vector2 dir = Vector2Normalize(Vector2Subtract(playerPos, enemyPos));
+                        enemies.x[i] += dir.x * speed * GetFrameTime();
+                        enemies.y[i] += dir.y * speed * GetFrameTime();
+                        if (CheckCollisionCircles(playerPos, 10, enemyPos, 10)) {
+                            game.health--;
+                            PlaySound(hurt);
+                            if (game.health <= 0 && game.permadeath) state = Dead;
+                        }
+                    }
+                }
+                if (IsKeyPressed(KEY_P)) state = Paused;
+                break;
+
+            case Dead:
+                DrawText("YOU DIED", windowX / 2 - 50, windowY / 2, 30, RED);
+                DrawText("Press R to Restart", windowX / 2 - 80, windowY / 2 + 40, 20, WHITE);
+                if (IsKeyPressed(KEY_R)) {
+                    difficultySelector(diff);
+                    InitLevelSystem();
+                    LoadWorld(currentWorld);
+                    state = Menu;
+                }
+                break;
+
+            case Paused:
+                DrawText("Paused", 300, 200, 40, WHITE);
+                if (IsKeyPressed(KEY_P)) state = GameState;
+                break;
+        }
+
+        EndDrawing();
+    }
+
+    UnloadSound(click);
+    UnloadSound(eat);
+    UnloadSound(hurt);
+    UnloadSound(explosion);
+    UnloadTexture(bg);
+    UnloadTexture(customMenuBG);
+    UnloadTexture(plank);
+    UnloadTexture(brick);
+    UnloadTexture(apple);
+    UnloadTexture(bomb);
+    UnloadTexture(fruit);
+    CloseAudioDevice();
+    CloseWindow();
+    return 0;
+}
